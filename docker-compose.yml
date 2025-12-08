@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    volumes:
+      - .:/app
+    # Note: This setup is for CPU.
+    # If your VM had a GPU, you would add a 'deploy' key here.
