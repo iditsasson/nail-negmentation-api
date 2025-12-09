@@ -18,6 +18,7 @@ class Detection(BaseModel):
 class NailImage(BaseModel):
     id: int
     score: float
+    polygon: list[list[int]] # List of [x, y] coordinate pairs
     image_base64: str # Base64 encoded PNG image
 
 # --- Abstract Base Class ---
@@ -141,10 +142,26 @@ class UltralyticsSegmenter(NailSegmenter):
             box_xyxy = boxes[i].tolist()
             mask_640 = masks_data[i]
             
-            # Iteration 3 Logic: INTER_LINEAR, No Morphology
             mask_orig_size_float = cv2.resize(mask_640, (W_orig, H_orig), interpolation=cv2.INTER_LINEAR)
             mask_255 = (mask_orig_size_float * 255).astype(np.uint8)
             mask_blurred = cv2.GaussianBlur(mask_255, (11, 11), 0)
+            
+            # --- Polygon Extraction for extract_nails (Ultralytics) ---
+            # We can re-use logic similar to _process_results or segment method
+            # For consistency with "segment", we should ideally use the same smoothing
+            # But here we are already committed to mask_255.
+            
+            # Re-threshold for contour
+            _, mask_binary_poly = cv2.threshold(mask_blurred, 127, 255, cv2.THRESH_BINARY)
+            contours, _ = cv2.findContours(mask_binary_poly, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            
+            polygon_list = []
+            if contours:
+                largest_contour = max(contours, key=cv2.contourArea)
+                epsilon = 0.002 * cv2.arcLength(largest_contour, True)
+                simplified_contour = cv2.approxPolyDP(largest_contour, epsilon, True)
+                polygon_list = simplified_contour.squeeze(axis=1).astype(int).tolist()
+            # -----------------------------------------------------------
 
             b, g, r = cv2.split(image)
             rgba = [b, g, r, mask_blurred]
@@ -166,6 +183,7 @@ class UltralyticsSegmenter(NailSegmenter):
             extracted_nails.append(NailImage(
                 id=i,
                 score=float(scores[i]),
+                polygon=polygon_list,
                 image_base64=png_as_text
             ))
             
@@ -345,6 +363,18 @@ class OnnxSegmenter(NailSegmenter):
         for i, data in enumerate(final_masks_data):
             x1, y1, x2, y2 = data['box']
             soft_mask = data['soft_mask']
+
+            # --- Polygon Extraction for extract_nails (ONNX) ---
+            _, mask_binary = cv2.threshold(soft_mask, 127, 255, cv2.THRESH_BINARY)
+            contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            
+            polygon_list = []
+            if contours:
+                largest_contour = max(contours, key=cv2.contourArea)
+                epsilon = 0.002 * cv2.arcLength(largest_contour, True)
+                simplified_contour = cv2.approxPolyDP(largest_contour, epsilon, True)
+                polygon_list = simplified_contour.squeeze(axis=1).astype(int).tolist()
+            # ---------------------------------------------------
             
             # Expansion
             expand = self.box_expansion
@@ -371,6 +401,7 @@ class OnnxSegmenter(NailSegmenter):
             extracted_nails.append(NailImage(
                 id=i,
                 score=float(scores[i]),
+                polygon=polygon_list,
                 image_base64=png_as_text
             ))
             

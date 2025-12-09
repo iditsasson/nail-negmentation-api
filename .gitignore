@@ -1,0 +1,10 @@
+# this is a gitignore file for the nail_seg python project
+
+__pycache__
+
+.env
+.venv
+
+nail_seg.db
+
+api_test_results
