@@ -244,9 +244,16 @@ class OnnxSegmenter(NailSegmenter):
         
         max_scores_valid = max_scores[valid_indices]
         
-        boxes_int = (boxes_xyxy * 1000).astype(np.int32) 
+        # Convert xyxy to xywh for cv2.dnn.NMSBoxes
+        boxes_xywh = np.stack([
+            boxes_xyxy[:, 0],
+            boxes_xyxy[:, 1],
+            boxes_xyxy[:, 2] - boxes_xyxy[:, 0],  # width
+            boxes_xyxy[:, 3] - boxes_xyxy[:, 1],  # height
+        ], axis=1)
+        boxes_int = (boxes_xywh * 1000).astype(np.int32)
         indices = cv2.dnn.NMSBoxes(
-            boxes_int, 
+            boxes_int,
             max_scores_valid.astype(np.float32), 
             self.conf_threshold, 
             self.iou_threshold
