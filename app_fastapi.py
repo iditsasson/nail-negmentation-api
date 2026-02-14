@@ -11,7 +11,7 @@ from ultralytics import YOLO
 import base64
 import requests
 from fastapi import BackgroundTasks
-from segmentation_engine import OnnxSegmenter, UltralyticsSegmenter, Detection, NailImage
+from segmentation_engine import OnnxSegmenter, UltralyticsSegmenter, Detection, NailImage, NailOrientation
 
 # --- Configuration ---
 MODEL_PATH = "nails_seg_s_yolov8_v1.pt"

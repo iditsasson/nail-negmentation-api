@@ -9,17 +9,94 @@ from pydantic import BaseModel
 
 # --- Data Models ---
 
+class NailOrientation(BaseModel):
+    angle: float       # degrees, compass convention (0=up, 90=right, 180=down, 270=left)
+    direction: str     # "up", "right", "down", "left"
+
 class Detection(BaseModel):
     id: int
     box: list[int]          # [x_min, y_min, x_max, y_max]
     score: float
     polygon: list[list[int]]  # List of [x, y] coordinate pairs
+    orientation: NailOrientation | None = None
 
 class NailImage(BaseModel):
     id: int
     score: float
     polygon: list[list[int]] # List of [x, y] coordinate pairs
+    orientation: NailOrientation | None = None
     image_base64: str # Base64 encoded PNG image
+
+# --- Orientation Detection ---
+
+def compute_nail_orientation(polygon: list[list[int]]) -> NailOrientation | None:
+    """Determine nail orientation from polygon geometry using ellipse fitting."""
+    if len(polygon) < 5:
+        return None
+
+    pts = np.array(polygon, dtype=np.float32)
+    try:
+        (cx, cy), (axis_w, axis_h), ellipse_angle = cv2.fitEllipse(pts)
+    except cv2.error:
+        return None
+
+    # Determine major axis angle (cv2 ellipse_angle is degrees from vertical, CW)
+    # axis_w = width of ellipse, axis_h = height; height is along the ellipse_angle direction
+    if axis_h >= axis_w:
+        # Major axis is along ellipse_angle direction
+        major_angle_deg = ellipse_angle
+    else:
+        # Major axis is perpendicular to ellipse_angle
+        major_angle_deg = ellipse_angle + 90.0
+
+    # Convert to radians for projection
+    major_rad = np.deg2rad(major_angle_deg)
+    # cv2 ellipse angle: 0 = vertical (up), increases clockwise
+    # Direction vector along major axis (in image coords: y increases downward)
+    dir_x = np.sin(major_rad)
+    dir_y = -np.cos(major_rad)  # negative because image y is inverted vs math y
+    major_axis = np.array([dir_x, dir_y])
+
+    # Perpendicular axis
+    perp_axis = np.array([-dir_y, dir_x])
+
+    # Project polygon points relative to centroid
+    centered = pts - np.array([cx, cy])
+    proj_major = centered @ major_axis
+    proj_perp = centered @ perp_axis
+
+    # Split into two halves along major axis at centroid (proj_major > 0 and < 0)
+    pos_mask = proj_major > 0
+    neg_mask = proj_major <= 0
+
+    if not np.any(pos_mask) or not np.any(neg_mask):
+        return None
+
+    # Measure perpendicular spread of each half (narrower = tip)
+    spread_pos = np.std(proj_perp[pos_mask]) if np.sum(pos_mask) > 1 else 0.0
+    spread_neg = np.std(proj_perp[neg_mask]) if np.sum(neg_mask) > 1 else 0.0
+
+    # Tip direction: toward the narrower half
+    if spread_pos < spread_neg:
+        tip_x, tip_y = dir_x, dir_y
+    else:
+        tip_x, tip_y = -dir_x, -dir_y
+
+    # Convert tip direction to compass angle (0=up, 90=right, 180=down, 270=left)
+    # In image coords: up = (0, -1), right = (1, 0), down = (0, 1), left = (-1, 0)
+    angle = np.degrees(np.arctan2(tip_x, -tip_y)) % 360  # arctan2(x, -y) gives compass angle
+
+    # Classify into cardinal direction
+    if angle >= 315 or angle < 45:
+        direction = "up"
+    elif 45 <= angle < 135:
+        direction = "right"
+    elif 135 <= angle < 225:
+        direction = "down"
+    else:
+        direction = "left"
+
+    return NailOrientation(angle=round(angle, 1), direction=direction)
 
 # --- Abstract Base Class ---
 
@@ -90,11 +167,13 @@ class UltralyticsSegmenter(NailSegmenter):
             if not polygon_list:
                 continue
 
+            orientation = compute_nail_orientation(polygon_list)
             final_data.append(Detection(
                 id=i,
                 box=[int(b) for b in box_xyxy],
                 score=float(scores[i]),
-                polygon=polygon_list
+                polygon=polygon_list,
+                orientation=orientation
             ))
         return final_data
 
@@ -180,13 +259,15 @@ class UltralyticsSegmenter(NailSegmenter):
             _, buffer = cv2.imencode('.png', cropped_nail)
             png_as_text = base64.b64encode(buffer).decode('utf-8')
             
+            orientation = compute_nail_orientation(polygon_list)
             extracted_nails.append(NailImage(
                 id=i,
                 score=float(scores[i]),
                 polygon=polygon_list,
+                orientation=orientation,
                 image_base64=png_as_text
             ))
-            
+
         return extracted_nails
 
 # --- ONNX Implementation ---
@@ -346,11 +427,13 @@ class OnnxSegmenter(NailSegmenter):
             if not polygon_list:
                 continue
 
+            orientation = compute_nail_orientation(polygon_list)
             detections.append(Detection(
                 id=i,
                 box=list(data['box']),
                 score=float(scores[i]),
-                polygon=polygon_list
+                polygon=polygon_list,
+                orientation=orientation
             ))
         return detections
 
@@ -405,11 +488,13 @@ class OnnxSegmenter(NailSegmenter):
             _, buffer = cv2.imencode('.png', cutout_rgba)
             png_as_text = base64.b64encode(buffer).decode('utf-8')
             
+            orientation = compute_nail_orientation(polygon_list)
             extracted_nails.append(NailImage(
                 id=i,
                 score=float(scores[i]),
                 polygon=polygon_list,
+                orientation=orientation,
                 image_base64=png_as_text
             ))
-            
+
         return extracted_nails
