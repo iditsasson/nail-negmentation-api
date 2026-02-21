@@ -1,0 +1,39 @@
+.git/
+*.md
+.github/
+
+# PyTorch model (unused in ONNX-only deployment)
+nails_seg_s_yolov8_v1.pt
+
+# Test files
+test_client.py
+test_img_*
+nail_test_*
+IMG_*
+api_test_results/
+
+# Validation scripts
+validate/
+
+# Python artifacts
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Docker/build files
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+CLAUDE.md
+.claude/
+validate/
+*.jpeg
+*.jpg
+requirements.dev.txt

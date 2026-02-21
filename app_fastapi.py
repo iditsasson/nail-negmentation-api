@@ -1,49 +1,48 @@
 import io
+import os
 import cv2
 import numpy as np
-import torch
 import uvicorn
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Security
 from fastapi.security.api_key import APIKeyHeader
 from starlette.status import HTTP_403_FORBIDDEN
 from pydantic import BaseModel
-from ultralytics import YOLO
 import base64
 import requests
 from fastapi import BackgroundTasks
-from segmentation_engine import OnnxSegmenter, UltralyticsSegmenter, Detection, NailImage, NailOrientation
+from segmentation_engine import OnnxSegmenter, Detection, NailImage, NailOrientation
 
 # --- Configuration ---
-MODEL_PATH = "nails_seg_s_yolov8_v1.pt"
 ONNX_MODEL_PATH = "onnx/nails_seg_s_yolov8_v1.onnx"
 CONF_THRESHOLD = 0.25
 IOU_THRESHOLD = 0.45
 IMG_SIZE = 640
-API_KEY = "019ae483-85c3-703d-8a20-d8c34ef0503c"
+API_KEY = os.environ.get("API_KEY", "019ae483-85c3-703d-8a20-d8c34ef0503c")
 API_KEY_NAME = "x-api-key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
-
-# --- FastAPI App Initialization ---
-app = FastAPI(title="Nail Segmentation API (Polygon)")
 
 # Store the model and device globally
 MODEL_STATE = {}
 
-@app.on_event("startup")
-def load_model():
-    """Load the model when the FastAPI application starts up."""
-    global MODEL_STATE
-    global MODEL_STATE
+# --- Lifespan ---
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load the model on startup, clean up on shutdown."""
     try:
-        # Initialize ONNX Segmenter by default
         segmenter = OnnxSegmenter(ONNX_MODEL_PATH, CONF_THRESHOLD, IOU_THRESHOLD, IMG_SIZE)
         segmenter.load_model()
-        
         MODEL_STATE['segmenter'] = segmenter
-        print(f"✅ Segmentation Engine loaded successfully.")
+        print(f"Segmentation Engine loaded successfully.")
     except Exception as e:
-        print(f"❌ Error loading model: {e}")
+        print(f"Error loading model: {e}")
         raise RuntimeError(f"Failed to load ML model: {e}")
+    yield
+    MODEL_STATE.clear()
+
+# --- FastAPI App Initialization ---
+app = FastAPI(title="Nail Segmentation API (Polygon)", lifespan=lifespan)
 
 # --- Response Model (Pydantic for automatic documentation) ---
 
@@ -82,66 +81,25 @@ async def verify_api_key(api_key_header: str = Security(api_key_header)):
             status_code=HTTP_403_FORBIDDEN, detail="Could not validate credentials"
         )
 
-# Logic moved to segmentation_engine.py
+# --- Health Endpoint ---
 
-def process_results_simple(results, model_state):
-    """
-    Extracts bounding boxes and polygon coordinates from YOLOv8 Results object.
-    """
-    final_data = []
-    
-    # Check if results are valid and contain masks
-    if not results or not results[0].masks:
-        return []
+@app.get("/health")
+async def health():
+    """Unauthenticated health check for Cloud Run warm-up pings."""
+    return {
+        "status": "healthy",
+        "model_loaded": "segmenter" in MODEL_STATE
+    }
 
-    result = results[0]
-
-    # Get boxes, scores, and polygons
-    boxes = result.boxes.xyxy.cpu().numpy()
-    scores = result.boxes.conf.cpu().numpy()
-    
-    # .xy contains the list of polygon coordinate arrays
-    polygons = result.masks.xy 
-
-    # Iterate through each detection
-    for i in range(len(boxes)):
-        box_xyxy = boxes[i].tolist()
-        
-        # Get the polygon for this specific object
-        polygon_np = polygons[i]
-        
-        # Convert numpy array of [x, y] pairs to a simple list of lists
-        # We use .astype(int) because pixel coordinates are integers
-        polygon_list = polygon_np.astype(int).tolist()
-
-        # --- Smoothing Logic ---
-        pts = np.array(polygon_list, dtype=np.int32)
-        pts = pts.reshape((-1, 1, 2))
-        perimeter = cv2.arcLength(pts, True)
-        epsilon = 0.002 * perimeter
-        smoothed_pts = cv2.approxPolyDP(pts, epsilon, True)
-        # Convert back to list of lists
-        smoothed_polygon_list = smoothed_pts.reshape(-1, 2).tolist()
-        # -----------------------
-        
-        final_data.append(Detection(
-            id=i,
-            box=[int(b) for b in box_xyxy],
-            score=float(scores[i]),
-            polygon=polygon_list  # Use smoothed polygon
-        ))
-
-    return final_data
-
-# --- API Endpoint ---
+# --- API Endpoints ---
 
 @app.post(
-    "/segment", 
+    "/segment",
     response_model=SegmentationResponse,
     summary="Run Nail Segmentation on Uploaded Image"
 )
 async def segment_image(
-    file: UploadFile = File(...), 
+    file: UploadFile = File(...),
     segmenter = Depends(get_segmenter),
     api_key: str = Depends(verify_api_key)
 ):
@@ -151,7 +109,7 @@ async def segment_image(
     """
     if file.content_type not in ["image/jpeg", "image/png", "image/webp"]:
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail="Unsupported file type. Please upload a JPEG, PNG, or WebP image."
         )
 
@@ -165,7 +123,7 @@ async def segment_image(
 
         # Run segmentation
         detections = segmenter.segment(img)
-        
+
         image_height, image_width = img.shape[:2]
 
         if not detections:
@@ -192,33 +150,30 @@ def process_and_callback(request: ExtractionRequest, segmenter):
     Background task to download image, extract nails, and call the callback URL.
     """
     try:
-        print(f"⏳ Starting background extraction for designId: {request.designId}")
-        
+        print(f"Starting background extraction for designId: {request.designId}")
+
         # 1. Download Image
         response = requests.get(request.imageUrl)
         if response.status_code != 200:
-            print(f"❌ Failed to download image from {request.imageUrl}")
+            print(f"Failed to download image from {request.imageUrl}")
             return
 
         file_bytes = np.frombuffer(response.content, dtype=np.uint8)
         img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
         if img is None:
-            print(f"❌ Could not decode image for designId: {request.designId}")
+            print(f"Could not decode image for designId: {request.designId}")
             return
 
         # 2. Extract Nails
         extracted_nails = segmenter.extract_nails(img)
-        
+
         if not extracted_nails:
-            print(f"⚠️ No nails detected for designId: {request.designId}")
-            # Still callback but with empty list? Or just log? 
-            # Let's callback with empty list so the status can be updated to 'done' (but with no nails)
-        
+            print(f"No nails detected for designId: {request.designId}")
+
         # 3. Prepare Payload
-        # Convert Pydantic models to dicts
         nails_data = [nail.dict() for nail in extracted_nails]
-        
+
         payload = {
             "designId": request.designId,
             "nails": nails_data,
@@ -226,16 +181,16 @@ def process_and_callback(request: ExtractionRequest, segmenter):
         }
 
         # 4. Send Callback
-        print(f"🚀 Sending callback to {request.callbackUrl}")
+        print(f"Sending callback to {request.callbackUrl}")
         cb_response = requests.post(request.callbackUrl, json=payload, headers={"x-api-key": API_KEY})
-        
+
         if cb_response.status_code == 200:
-            print(f"✅ Callback successful for designId: {request.designId}")
+            print(f"Callback successful for designId: {request.designId}")
         else:
-            print(f"❌ Callback failed with status {cb_response.status_code}: {cb_response.text}")
+            print(f"Callback failed with status {cb_response.status_code}: {cb_response.text}")
 
     except Exception as e:
-        print(f"❌ Error in background task: {e}")
+        print(f"Error in background task: {e}")
 
 
 @app.post(
@@ -271,7 +226,7 @@ async def extract_nails_sync_endpoint(
     """
     if file.content_type not in ["image/jpeg", "image/png", "image/webp"]:
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail="Unsupported file type. Please upload a JPEG, PNG, or WebP image."
         )
 

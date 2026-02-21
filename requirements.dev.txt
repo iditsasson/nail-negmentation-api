@@ -5,3 +5,5 @@ opencv-python-headless
 numpy
 onnxruntime
 requests
+ultralytics
+torch

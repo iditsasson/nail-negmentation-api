@@ -2,9 +2,14 @@ import abc
 import numpy as np
 import cv2
 import base64
-import torch
 import onnxruntime as ort
-from ultralytics import YOLO
+
+try:
+    import torch
+    from ultralytics import YOLO
+    _HAS_ULTRALYTICS = True
+except ImportError:
+    _HAS_ULTRALYTICS = False
 from pydantic import BaseModel
 
 # --- Data Models ---
@@ -31,8 +36,11 @@ class NailImage(BaseModel):
 
 def compute_nail_orientation(polygon: list[list[int]]) -> NailOrientation | None:
     """Determine nail orientation from polygon geometry using ellipse fitting."""
+    print('compute_nail_orientation')
     if len(polygon) < 5:
         return None
+
+    print(" > 5")
 
     pts = np.array(polygon, dtype=np.float32)
     try:
@@ -117,6 +125,8 @@ class NailSegmenter(abc.ABC):
 
 class UltralyticsSegmenter(NailSegmenter):
     def __init__(self, model_path: str, conf_threshold: float = 0.25, iou_threshold: float = 0.45, img_size: int = 640):
+        if not _HAS_ULTRALYTICS:
+            raise ImportError("torch and ultralytics are required for UltralyticsSegmenter. Install them with: pip install torch ultralytics")
         self.model_path = model_path
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold

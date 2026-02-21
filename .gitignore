@@ -8,3 +8,7 @@ __pycache__
 nail_seg.db
 
 api_test_results
+
+validate/
+*.jpeg
+*.jpg
